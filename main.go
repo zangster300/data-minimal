@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	datastar "github.com/starfederation/datastar/sdk/go"
@@ -15,24 +18,72 @@ import (
 const port = 9001
 
 func main() {
+	ctx := context.Background()
+
+	if err := run(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "%s\n", err)
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context) error {
+	sctx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
 	mux := http.NewServeMux()
 
-	cdn := "https://cdn.jsdelivr.net/gh/starfederation/datastar@develop/bundles/datastar.js"
-	style := "display:flex;flex-direction:column;background-color:oklch(25.3267% 0.015896 252.417568);height:100vh;justify-content:center;align-items:center;font-family:ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';"
+	srv := &http.Server{
+		Addr:    fmt.Sprintf("0.0.0.0:%d", port),
+		Handler: mux,
+	}
 
-	page := []byte(fmt.Sprintf(`
+	cdn := "https://cdn.jsdelivr.net/gh/starfederation/datastar@develop/bundles/datastar.js"
+
+	page := fmt.Appendf(nil, `
 	<!DOCTYPE html>
 	<html lang="en">
 	<head>
-	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0" />
-	<script type="module" defer src="%s"></script>
+		<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0" />
+		<script type="module" defer src="%s"></script>
+		<style>
+			*, *::before, *::after {
+  				box-sizing: border-box;
+			}
+
+			* {
+				margin: 0;
+			}
+
+			:root {
+				--bg-color: oklch(92.2%% 0 0);
+			}
+
+			@media (prefers-color-scheme: dark) {
+				:root {
+					--bg-color: oklch(25.3267%% 0.015896 252.417568);
+				}	
+			}
+
+			body {
+				align-items: center;
+				background-color: var(--bg-color);
+				display: flex;
+				flex-direction: column;
+				font-family: ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
+				height: 100vh;
+				justify-content: center;
+			}
+		</style>
 	</head>
-	<body style="%s">
-	<span id="feed" data-on-load="%s"></span>
+	<body>
+		<span id="feed" data-on-load="%s"></span>
 	</body>
 	</html>
-	`, cdn, style, datastar.GetSSE("/stream")))
+	`,
+		cdn,
+		datastar.GetSSE("/stream"))
 
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		w.Write(page)
@@ -70,8 +121,20 @@ func main() {
 	})
 
 	logger.Info(fmt.Sprintf("Server starting at 0.0.0.0:%d", port))
-	if err := http.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", port), mux); err != nil {
-		logger.Error("Error starting server:", slog.String("error", err.Error()))
+	defer logger.Info("Server closed")
+
+	go func() {
+		<-sctx.Done()
+		srv.Shutdown(ctx)
+	}()
+
+	err := srv.ListenAndServe()
+	if err != nil {
+		if err == http.ErrServerClosed {
+			return nil
+		}
+		return err
 	}
 
+	return nil
 }
