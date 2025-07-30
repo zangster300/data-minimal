@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	datastar "github.com/starfederation/datastar/sdk/go"
+	"github.com/starfederation/datastar-go/datastar"
 )
 
 const port = 9001
@@ -39,7 +39,7 @@ func run(ctx context.Context) error {
 		Handler: mux,
 	}
 
-	cdn := "https://cdn.jsdelivr.net/gh/starfederation/datastar@develop/bundles/datastar.js"
+	cdn := "https://cdn.jsdelivr.net/gh/starfederation/datastar@main/bundles/datastar.js"
 
 	page := fmt.Appendf(nil, `
 	<!DOCTYPE html>
@@ -113,9 +113,9 @@ func run(ctx context.Context) error {
 
 				hexString := hex.EncodeToString(bytes)
 
-				frag := fmt.Sprintf(`<span id="feed" style="color:#%s;border:1px solid #%s;border-radius:0.25rem;padding:1rem;">%s</span>`, hexString, hexString, hexString)
+				element := fmt.Sprintf(`<span id="feed" style="color:#%s;border:1px solid #%s;border-radius:0.25rem;padding:1rem;">%s</span>`, hexString, hexString, hexString)
 
-				sse.MergeFragments(frag)
+				sse.PatchElements(element)
 			}
 		}
 	})
