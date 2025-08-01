@@ -15,27 +15,47 @@ import (
 	"github.com/starfederation/datastar-go/datastar"
 )
 
-const port = 9001
+const (
+	host = "0.0.0.0"
+	port = 9001
+)
 
 func main() {
-	ctx := context.Background()
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: func() slog.Level {
+			switch os.Getenv("LOG_LEVEL") {
+			case "DEBUG":
+				return slog.LevelDebug
+			case "INFO":
+				return slog.LevelInfo
+			case "WARN":
+				return slog.LevelWarn
+			case "ERROR":
+				return slog.LevelError
+			default:
+				return slog.LevelInfo
+			}
+		}(),
+	}))
+	slog.SetDefault(logger)
+
+	slog.Info("server started", "host", host, "port", port)
+	defer slog.Info("server shutdown complete")
 
 	if err := run(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "%s\n", err)
+		slog.Error("error running server", "error", err)
 		os.Exit(1)
 	}
 }
 
 func run(ctx context.Context) error {
-	sctx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-
 	mux := http.NewServeMux()
 
 	srv := &http.Server{
-		Addr:    fmt.Sprintf("0.0.0.0:%d", port),
+		Addr:    fmt.Sprintf("%s:%d", host, port),
 		Handler: mux,
 	}
 
@@ -83,10 +103,13 @@ func run(ctx context.Context) error {
 	</html>
 	`,
 		cdn,
-		datastar.GetSSE("/stream"))
+		datastar.GetSSE("/stream"),
+	)
 
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		w.Write(page)
+		if _, err := w.Write(page); err != nil {
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		}
 	})
 
 	mux.HandleFunc("GET /stream", func(w http.ResponseWriter, r *http.Request) {
@@ -99,15 +122,15 @@ func run(ctx context.Context) error {
 			select {
 
 			case <-r.Context().Done():
-				logger.Debug("Client connection closed")
+				slog.Debug("client connection closed")
 				return
 
 			case <-ticker.C:
 				bytes := make([]byte, 3)
 
-				_, err := rand.Read(bytes)
-				if err != nil {
-					logger.Error("Error generating random bytes: ", slog.String("error", err.Error()))
+				n, err := rand.Read(bytes)
+				if err != nil || n != len(bytes) {
+					slog.Error("error generating random bytes", slog.Int("read", n), slog.String("error", err.Error()))
 					return
 				}
 
@@ -115,23 +138,32 @@ func run(ctx context.Context) error {
 
 				element := fmt.Sprintf(`<span id="feed" style="color:#%s;border:1px solid #%s;border-radius:0.25rem;padding:1rem;">%s</span>`, hexString, hexString, hexString)
 
-				sse.PatchElements(element)
+				if err := sse.PatchElements(element); err != nil {
+					slog.Error("failed to patch elements", "error", err)
+					http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+				}
 			}
 		}
 	})
 
-	logger.Info(fmt.Sprintf("Server starting at 0.0.0.0:%d", port))
-	defer logger.Info("Server closed")
-
+	shutdownErrChannel := make(chan error, 1)
 	go func() {
-		<-sctx.Done()
-		srv.Shutdown(ctx)
+		<-ctx.Done()
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		err := srv.Shutdown(shutdownCtx)
+		if err != nil {
+			slog.Error("error encountered during server shutdown", "error", err)
+		}
+
+		shutdownErrChannel <- err
 	}()
 
-	err := srv.ListenAndServe()
-	if err != nil {
+	if err := srv.ListenAndServe(); err != nil {
 		if err == http.ErrServerClosed {
-			return nil
+			return <-shutdownErrChannel
 		}
 		return err
 	}
