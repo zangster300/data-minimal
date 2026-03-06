@@ -4,13 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/starfederation/datastar-go/datastar"
@@ -19,12 +20,10 @@ import (
 const (
 	host = "0.0.0.0"
 	port = 8080
+	cdn  = "https://cdn.jsdelivr.net/gh/starfederation/datastar@main/bundles/datastar.js"
 )
 
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: func() slog.Level {
 			switch strings.ToLower(os.Getenv("LOG_LEVEL")) {
@@ -43,24 +42,18 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
-	slog.Info("server started", "host", host, "port", port)
-	defer slog.Info("server shutdown complete")
-
+	ctx := context.Background()
 	if err := run(ctx); err != nil {
-		slog.Error("error running server", "error", err)
+		slog.Error("server failure", "error", err)
 		os.Exit(1)
 	}
+
+	slog.Info("server shutdown complete")
 }
 
 func run(ctx context.Context) error {
-	mux := http.NewServeMux()
-
-	srv := &http.Server{
-		Addr:    fmt.Sprintf("%s:%d", host, port),
-		Handler: mux,
-	}
-
-	cdn := "https://cdn.jsdelivr.net/gh/starfederation/datastar@main/bundles/datastar.js"
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
+	defer cancel()
 
 	page := fmt.Appendf(nil, `
 	<!DOCTYPE html>
@@ -98,14 +91,16 @@ func run(ctx context.Context) error {
 			}
 		</style>
 	</head>
-	<body>
-		<span id="feed" data-on-load="%s"></span>
+	<body data-init="%s">
+		<span id="feed"></span>
 	</body>
 	</html>
 	`,
 		cdn,
 		datastar.GetSSE("/stream"),
 	)
+
+	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		if _, err := w.Write(page); err != nil {
@@ -117,7 +112,7 @@ func run(ctx context.Context) error {
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
 
-		sse := datastar.NewSSE(w, r)
+		sse := datastar.NewSSE(w, r, datastar.WithCompression(datastar.WithBrotli()))
 
 		for {
 			select {
@@ -147,27 +142,42 @@ func run(ctx context.Context) error {
 		}
 	})
 
-	shutdownErrChannel := make(chan error, 1)
+	srv := &http.Server{
+		Addr:    fmt.Sprintf("%s:%d", host, port),
+		Handler: mux,
+		BaseContext: func(l net.Listener) context.Context {
+			return ctx
+		},
+	}
+
+	srvErrChan := make(chan error, 1)
+
 	go func() {
-		<-ctx.Done()
+		slog.Info("server started", "addr", srv.Addr)
+
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			srvErrChan <- err
+			return
+		}
+
+		srvErrChan <- nil
+	}()
+
+	select {
+	case err := <-srvErrChan:
+		if err != nil {
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		slog.Debug("shutdown signal received")
 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		err := srv.Shutdown(shutdownCtx)
-		if err != nil {
-			slog.Error("error encountered during server shutdown", "error", err)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("shutdown failed: %w", err)
 		}
-
-		shutdownErrChannel <- err
-	}()
-
-	if err := srv.ListenAndServe(); err != nil {
-		if err == http.ErrServerClosed {
-			return <-shutdownErrChannel
-		}
-		return err
+		return <-srvErrChan
 	}
-
-	return nil
 }
