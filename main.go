@@ -20,7 +20,6 @@ import (
 const (
 	host = "0.0.0.0"
 	port = 8080
-	cdn  = "https://cdn.jsdelivr.net/gh/starfederation/datastar@main/bundles/datastar.js"
 )
 
 func main() {
@@ -60,7 +59,7 @@ func run(ctx context.Context) error {
 	<html lang="en">
 	<head>
 		<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0" />
-		<script type="module" defer src="%s"></script>
+		<script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.1/bundles/datastar.js"></script>
 		<style>
 			*, *::before, *::after {
   				box-sizing: border-box;
@@ -96,13 +95,13 @@ func run(ctx context.Context) error {
 	</body>
 	</html>
 	`,
-		cdn,
 		datastar.GetSSE("/stream"),
 	)
 
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if _, err := w.Write(page); err != nil {
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		}
@@ -136,7 +135,7 @@ func run(ctx context.Context) error {
 
 				if err := sse.PatchElements(element); err != nil {
 					slog.Error("failed to patch elements", "error", err)
-					http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+					return
 				}
 			}
 		}
