@@ -2,11 +2,10 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"os"
@@ -88,6 +87,14 @@ func run(ctx context.Context) error {
 				height: 100vh;
 				justify-content: center;
 			}
+
+			#feed {
+				display: grid;
+				place-content: center;
+				min-width: 10rem;
+				min-height: 2rem;
+			}
+
 		</style>
 	</head>
 	<body data-init="%s">
@@ -103,7 +110,7 @@ func run(ctx context.Context) error {
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if _, err := w.Write(page); err != nil {
-			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			slog.Error("failed to write response", "error", err)
 		}
 	})
 
@@ -121,17 +128,8 @@ func run(ctx context.Context) error {
 				return
 
 			case <-ticker.C:
-				bytes := make([]byte, 3)
-
-				n, err := rand.Read(bytes)
-				if err != nil || n != len(bytes) {
-					slog.Error("error generating random bytes", slog.Int("read", n), slog.String("error", err.Error()))
-					return
-				}
-
-				hexString := hex.EncodeToString(bytes)
-
-				element := fmt.Sprintf(`<span id="feed" style="color:#%s;border:1px solid #%s;border-radius:0.25rem;padding:1rem;">%s</span>`, hexString, hexString, hexString)
+				color := fmt.Sprintf("%06x", rand.IntN(1<<24))
+				element := fmt.Sprintf(`<span id="feed" style="color:#%s;border:1px solid #%s;border-radius:0.25rem;padding:1rem;">%s</span>`, color, color, color)
 
 				if err := sse.PatchElements(element); err != nil {
 					slog.Error("failed to patch elements", "error", err)
@@ -150,16 +148,14 @@ func run(ctx context.Context) error {
 	}
 
 	srvErrChan := make(chan error, 1)
-
 	go func() {
 		slog.Info("server started", "addr", srv.Addr)
 
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			srvErrChan <- err
-			return
+		err := srv.ListenAndServe()
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
 		}
-
-		srvErrChan <- nil
+		srvErrChan <- err
 	}()
 
 	select {
@@ -171,7 +167,7 @@ func run(ctx context.Context) error {
 	case <-ctx.Done():
 		slog.Debug("shutdown signal received")
 
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 
 		if err := srv.Shutdown(shutdownCtx); err != nil {
